@@ -1,4 +1,4 @@
-/******************************************************************************
+/**************************
                            TRABAJO FINAL EDIII
 
                                 INTEGRANTES:
@@ -6,119 +6,150 @@
                         - CASTILLA PABLO
                         - RIVERA LUIS MARIANO
                         - MOHAMMAD CABREJOS SAQIB DANIEL
-*******************************************************************************/
+***************************/
 #ifdef __USE_CMSIS
 #include "LPC17xx.h"
 #endif
 
-
+#include "lpc17xx_gpio.h"
+#include "lpc17xx_pinsel.h"
 #include "lpc17xx_adc.h"
 #include "lpc17xx_timer.h"
 #include "lpc17xx_nvic.h"
-#include "lpc17xx_pinsel.h"
-#include "lpc17xx_gpio.h"
-
-#define RATE_ADC 200000
-#define CHANNEL_ADC 0
-#define PRESCALE_VALUE 1000000
-#define TIME_MATCH 5
-#define MATCH_CHANNEL 1
-#define DONE 1
-#define OVERRUN 0
-#define PORT0 0
-#define PIN0 (1<<0)
-#define OUTPUT 1
-
-volatile uint16_t adc_value; //Aqui se guardara el valor de la conversion
-volatile uint32_t Channel0_error;
+#include "lpc17xx_uart.h"
+#include "string.h"
+#include "stdio.h"
 
 
-void config_ADC(void);
-void config_TIMER(void);
-void configLed(void);
-void delay(void);
+volatile uint32_t adc_value = 0; //Aqui se guardara el valor de la conversion
+static const uint8_t CHANNEL_ADC = 7;
+static const uint32_t RATE_ADC = 200000; //200Khz
+static const uint8_t MATCH_CHANNEL = 0;
+static const uint32_t prescale_value = 24;
+static const uint32_t match_value = 5000000;
 
-void configLed(void){
-	PINSEL_CFG_Type led;
-    led.Portnum = PINSEL_PORT_0;
-    led.Pinnum = PINSEL_PIN_0;
-    led.Funcnum = PINSEL_FUNC_0;
-    led.Pinmode = PINSEL_PINMODE_TRISTATE;
-    led.OpenDrain = PINSEL_PINMODE_NORMAL;
-    PINSEL_ConfigPin(&led);
-    GPIO_SetDir(PORT0, PIN0, OUTPUT);
+void uart3_SendADC(uint32_t value);
+
+void TIMER0_IRQHandler(void){
+    if(TIM_GetIntStatus(LPC_TIM0, TIM_MR0_INT) == SET){
+
+    	ADC_StartCmd(LPC_ADC, ADC_START_NOW);
+
+    	while (!(ADC_ChannelGetStatus(LPC_ADC, ADC_CHANNEL_7, ADC_DATA_DONE)));
+
+    	adc_value = ADC_ChannelGetData(LPC_ADC, ADC_CHANNEL_7);
+        uart3_SendADC(adc_value);
+    	// Ejemplo: LED encendido si potenciómetro > 50%
+    	if(adc_value > 2048){
+    	    LPC_GPIO0->FIOCLR = (1 << 22); // Enciende LED
+    	} else {
+    	    LPC_GPIO0->FIOSET = (1 << 22); // Apaga LED
+    	}
+
+    	//TIM_Cmd(LPC_TIM0, ENABLE); //inicia el timer
+    	TIM_ClearIntPending(LPC_TIM0,TIM_MR0_INT); //Limpio bandera de interrupcion del timer0
+    }
 }
+
+
+void config_LED(void){
+    //Configuro el pin P0.22 como salida GPIO para el LED
+    PINSEL_CFG_Type pinsel_led;
+    pinsel_led.Portnum = 0;
+    pinsel_led.Pinnum = 22;
+    pinsel_led.Funcnum = 0; //GPIO
+    pinsel_led.Pinmode = 1;
+    pinsel_led.OpenDrain = 0;
+    PINSEL_ConfigPin(&pinsel_led);
+
+    //Configuro el pin como salida
+    LPC_GPIO0->FIODIR |= (1 << 22);
+    LPC_GPIO0->FIOSET |= (1 << 22);
+}
+
 
 void config_ADC(void){
 
-    //Se configura el ADC0 para la entrada
+    //Se configura el ADC7 para la entrada pin P0.2
     PINSEL_CFG_Type pinsel_adc;
-    pinsel_adc.Portnum = PINSEL_PORT_0;
-    pinsel_adc.Pinnum = PINSEL_PIN_23;
-    pinsel_adc.Funcnum = PINSEL_FUNC_1;
-    pinsel_adc.Pinmode = PINSEL_PINMODE_TRISTATE;
-    pinsel_adc.OpenDrain = PINSEL_PINMODE_NORMAL;
+    pinsel_adc.Portnum = 0;
+    pinsel_adc.Pinnum = 2;
+    pinsel_adc.Funcnum = 2;
+    pinsel_adc.Pinmode = 1;
     PINSEL_ConfigPin(&pinsel_adc);
 
-    NVIC_DisableIRQ(ADC_IRQn);
-    NVIC_SetPriority(ADC_IRQn, 0); //Seteamos la interrupcion del ADC con maxima prioridad
-    //Usamos 200Khz para el ADC, que interrumpa cuando termine
-    //Y que inicie la conversion cada que haya MATCH
-    ADC_Init(LPC_ADC, RATE_ADC);
-    ADC_IntConfig(LPC_ADC, ADC_ADINTEN0, ENABLE);
-    ADC_ChannelCmd(LPC_ADC, CHANNEL_ADC, ENABLE);
-    ADC_StartCmd(LPC_ADC, ADC_START_ON_MAT01); //Match 1 del Timer 0
 
-    NVIC_EnableIRQ(ADC_IRQn);
+    ADC_Init(LPC_ADC, RATE_ADC);
+    ADC_ChannelCmd(LPC_ADC, CHANNEL_ADC, ENABLE);
+    ADC_BurstCmd(LPC_ADC, DISABLE);
 }
 
 void config_TIMER(void){
     //Configuramos el timer
     TIM_TIMERCFG_Type struct_timer;
-    struct_timer.PrescaleOption = TIM_PRESCALE_USVAL; //Valor del prescaler en microsegundos
-    struct_timer.PrescaleValue = PRESCALE_VALUE;
+    TIM_MATCHCFG_Type struct_match;
+    struct_timer.PrescaleOption = TIM_PRESCALE_TICKVAL;
+    struct_timer.PrescaleValue = prescale_value;
 
     //Inicializo el Timer 0
     TIM_Init(LPC_TIM0, TIM_TIMER_MODE, &struct_timer);
 
     //Configuramos el match para que haga match cada 5 segundos
-    TIM_MATCHCFG_Type struct_match;
+
     struct_match.MatchChannel = MATCH_CHANNEL;
-    struct_match.IntOnMatch = DISABLE;
-    struct_match.StopOnMatch = DISABLE;
+    struct_match.IntOnMatch = ENABLE;
     struct_match.ResetOnMatch = ENABLE;
+    struct_match.StopOnMatch = DISABLE;
     struct_match.ExtMatchOutputType = TIM_EXTMATCH_NOTHING;
-    struct_match.MatchValue = TIME_MATCH;
+    struct_match.MatchValue = match_value; //5 segundos
 
-    //Inicializo el Match 1 del Timer
+    //Inicializo el Match 0 del Timer
     TIM_ConfigMatch(LPC_TIM0, &struct_match);
-
+    TIM_ResetCounter(LPC_TIM0);
     //Habilito el Timer0
     TIM_Cmd(LPC_TIM0, ENABLE);
+
+    TIM_ClearIntPending(LPC_TIM0,TIM_MR0_INT); //Limpio bandera de interrupcion del timer0
+    NVIC_SetPriority(TIMER0_IRQn, 1);
+    NVIC_EnableIRQ(TIMER0_IRQn);
 }
 
-void ADC_IRQHandler(void){
-    //Primero verificamos que la conversion haya terminado
-    if(ADC_ChannelGetStatus(LPC_ADC, CHANNEL_ADC, DONE)){
-        volatile uint16_t aux = ADC_ChannelGetData(LPC_ADC, CHANNEL_ADC); //12 bits de 15:4 result segun LPC_ADC->ADDR0
-        adc_value = (aux >> 4) & 0xFFF;
-        //Desplazo el resultado 4 bits a la derecha-> adc_value = [xxxxadc____value] 11:0
-        GPIO_SetValue(PORT0, PIN0);
-        delay();
-        GPIO_ClearValue(PORT0, PIN0);
-    }
-    if(ADC_ChannelGetStatus(LPC_ADC, CHANNEL_ADC, OVERRUN)){
-        Channel0_error++; //Si hay Overrun que incremente la cantidad de conversiones fallidas
-    }
+void config_Uart(uint32_t baud){
+    PINSEL_CFG_Type uart_config;
+    uart_config.Portnum = 0;
+    uart_config.Pinnum = 0;
+    uart_config.Funcnum = 2;
+    uart_config.Pinmode = 1;
+    uart_config.OpenDrain = 0;
+    PINSEL_ConfigPin(&uart_config);
+
+    UART_CFG_Type uart_cfg;
+    UART_ConfigStructInit(&uart_cfg);
+    uart_cfg.Baud_rate = baud;
+    UART_Init(LPC_UART3, &uart_cfg);
+
+    UART_FIFO_CFG_Type uart_fifo;
+    UART_FIFOConfigStructInit(&uart_fifo);
+    UART_FIFOConfig(LPC_UART3, &uart_fifo);
+
+    UART_TxCmd(LPC_UART3, ENABLE);
 }
-void delay(void){
-	for(volatile int i=0; i<1000000000;i++);
+
+void uart3_SendADC(uint32_t value){
+    char buf[32];
+    int n = sprintf(buf, "ADC=%lu\r\n", (unsigned long)value);
+    UART_Send(LPC_UART3, (uint8_t*)buf, (uint32_t)n, BLOCKING);
 }
+
 
 int main(void)
 {
-    config_TIMER();
+    config_LED();
     config_ADC();
-    while(1){__WFI();}
+    config_TIMER();
+    config_Uart(9600);
+    while(1){
+    }
+
     return 0;
 }
