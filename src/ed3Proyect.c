@@ -1,4 +1,4 @@
-/**************************
+/******************************************************************************
                            TRABAJO FINAL EDIII
 
                                 INTEGRANTES:
@@ -6,7 +6,7 @@
                         - CASTILLA PABLO
                         - RIVERA LUIS MARIANO
                         - MOHAMMAD CABREJOS SAQIB DANIEL
-***************************/
+*******************************************************************************/
 #ifdef __USE_CMSIS
 #include "LPC17xx.h"
 #endif
@@ -17,6 +17,7 @@
 #include "lpc17xx_timer.h"
 #include "lpc17xx_nvic.h"
 #include "lpc17xx_uart.h"
+#include "lpc17xx_gpdma.h"
 #include "string.h"
 #include "stdio.h"
 
@@ -28,7 +29,6 @@ static const uint8_t MATCH_CHANNEL = 0;
 static const uint32_t prescale_value = 24;
 static const uint32_t match_value = 5000000;
 
-void uart3_SendADC(uint32_t value);
 
 void TIMER0_IRQHandler(void){
     if(TIM_GetIntStatus(LPC_TIM0, TIM_MR0_INT) == SET){
@@ -38,7 +38,6 @@ void TIMER0_IRQHandler(void){
     	while (!(ADC_ChannelGetStatus(LPC_ADC, ADC_CHANNEL_7, ADC_DATA_DONE)));
 
     	adc_value = ADC_ChannelGetData(LPC_ADC, ADC_CHANNEL_7);
-        uart3_SendADC(adc_value);
     	// Ejemplo: LED encendido si potenciómetro > 50%
     	if(adc_value > 2048){
     	    LPC_GPIO0->FIOCLR = (1 << 22); // Enciende LED
@@ -67,6 +66,51 @@ void config_LED(void){
     LPC_GPIO0->FIOSET |= (1 << 22);
 }
 
+void config_DMA(void) {
+
+    GPDMA_Init(); // Inicializa el controlador de DMA
+
+    // Configura el canal de DMA para transferir datos desde el buffer a UART
+    GPDMA_Channel_CFG_Type dacuart;
+    dacuart.ChannelNum = 0;
+    dacuart.SrcMemAddr = 0;
+    dacuart.DstMemAddr = 0;
+    dacuart.TransferSize = 1;
+    dacuart.TransferWidth = GPDMA_WIDTH_BYTE;
+    dacuart.TransferType = GPDMA_TRANSFERTYPE_P2P;
+    dacuart.SrcConn = GPDMA_CONN_ADC;
+    dacuart.DstConn = GPDMA_CONN_UART3_Tx;
+    dacuart.DMALLI = 0;
+
+    // Configura
+    GPDMA_Setup(&dacuart);
+    GPDMA_ChannelCmd(0, ENABLE); // Activa el canal DMA 0
+}
+
+
+void config_Uart(void){
+    PINSEL_CFG_Type uart_config;
+    uart_config.Portnum = 0;
+    uart_config.Pinnum = 0;
+    uart_config.Funcnum = 2;
+    uart_config.Pinmode = PINSEL_PINMODE_TRISTATE;
+    uart_config.OpenDrain = 0;
+    PINSEL_ConfigPin(&uart_config);
+
+    UART_CFG_Type uart_cfg;
+    UART_ConfigStructInit(&uart_cfg);
+    UART_Init(LPC_UART3, &uart_cfg);
+
+    UART_FIFO_CFG_Type UARTFIFOConfigStruct;
+    UARTFIFOConfigStruct.FIFO_DMAMode = ENABLE; // Habilita el modo DMA
+    UARTFIFOConfigStruct.FIFO_Level = UART_FIFO_TRGLEV0;
+    UARTFIFOConfigStruct.FIFO_ResetRxBuf = ENABLE;
+    UARTFIFOConfigStruct.FIFO_ResetTxBuf = ENABLE;
+    UART_FIFOConfigStructInit(&UARTFIFOConfigStruct);
+
+    UART_FIFOConfig(LPC_UART3, &UARTFIFOConfigStruct);
+    UART_TxCmd(LPC_UART3, ENABLE);
+}
 
 void config_ADC(void){
 
@@ -114,40 +158,14 @@ void config_TIMER(void){
     NVIC_EnableIRQ(TIMER0_IRQn);
 }
 
-void config_Uart(uint32_t baud){
-    PINSEL_CFG_Type uart_config;
-    uart_config.Portnum = 0;
-    uart_config.Pinnum = 0;
-    uart_config.Funcnum = 2;
-    uart_config.Pinmode = 1;
-    uart_config.OpenDrain = 0;
-    PINSEL_ConfigPin(&uart_config);
-
-    UART_CFG_Type uart_cfg;
-    UART_ConfigStructInit(&uart_cfg);
-    uart_cfg.Baud_rate = baud;
-    UART_Init(LPC_UART3, &uart_cfg);
-
-    UART_FIFO_CFG_Type uart_fifo;
-    UART_FIFOConfigStructInit(&uart_fifo);
-    UART_FIFOConfig(LPC_UART3, &uart_fifo);
-
-    UART_TxCmd(LPC_UART3, ENABLE);
-}
-
-void uart3_SendADC(uint32_t value){
-    char buf[32];
-    int n = sprintf(buf, "ADC=%lu\r\n", (unsigned long)value);
-    UART_Send(LPC_UART3, (uint8_t*)buf, (uint32_t)n, BLOCKING);
-}
-
 
 int main(void)
 {
     config_LED();
     config_ADC();
+    config_Uart();
+    config_DMA();
     config_TIMER();
-    config_Uart(9600);
     while(1){
     }
 
